@@ -16,6 +16,8 @@
 #include "sindi.h"
 
 #include "analyzer/analyzer.h"
+
+#include <algorithm>
 #include "impl/heap/standard_heap.h"
 #include "index_feature_list.h"
 #include "simd/fp16_simd.h"
@@ -85,7 +87,9 @@ SINDI::SINDI(const SINDIParameterPtr& param, const IndexCommonParam& common_para
       quantization_params_(std::make_shared<QuantizationParams>()),
       avg_doc_term_length_(param->avg_doc_term_length),
       remap_term_ids_(param->remap_term_ids),
-      immutable_enabled_(param->immutable) {
+      immutable_enabled_(param->immutable),
+      store_positions_(param->store_positions),
+      max_positions_per_term_(param->max_positions_per_term) {
     if (remap_term_ids_) {
         term_id_mapper_ =
             std::make_shared<TermIdMapper>(term_id_limit_, common_param.allocator_.get());
@@ -173,7 +177,9 @@ SINDI::Add(const DatasetPtr& base) {
                                                  term_id_limit_,
                                                  allocator_,
                                                  sparse_value_quant_type_,
-                                                 quantization_params_));
+                                                 quantization_params_,
+                                                 store_positions_,
+                                                 max_positions_per_term_));
         window_changed = true;
     }
 
@@ -200,6 +206,18 @@ SINDI::Add(const DatasetPtr& base) {
         try {
             if (remap_term_ids_) {
                 auto remapped = remap_sparse_vector_for_build(sparse_vector, tmp_ids);
+                // Remap token_sequence if present: replace original term IDs with compact IDs
+                Vector<uint32_t> remapped_token_seq(allocator_);
+                if (sparse_vector.token_sequence_ != nullptr && sparse_vector.token_seq_len_ > 0) {
+                    remapped_token_seq.resize(sparse_vector.token_seq_len_);
+                    for (uint32_t ti = 0; ti < sparse_vector.token_seq_len_; ++ti) {
+                        auto mapped = term_id_mapper_->TryMap(sparse_vector.token_sequence_[ti]);
+                        remapped_token_seq[ti] =
+                            mapped.has_value() ? mapped.value() : sparse_vector.token_sequence_[ti];
+                    }
+                    remapped.token_seq_len_ = sparse_vector.token_seq_len_;
+                    remapped.token_sequence_ = remapped_token_seq.data();
+                }
                 window_term_list_[cur_window]->InsertVector(remapped, inner_id);
             } else {
                 window_term_list_[cur_window]->InsertVector(sparse_vector, inner_id);
@@ -337,8 +355,39 @@ SINDI::KnnSearch(const DatasetPtr& query,
                                                  search_param.use_term_lists_heap_insert,
                                                  rerank_query);
     }
-    return search_impl<KNN_SEARCH>(
-        computer, inner_param, allocator, search_param.use_term_lists_heap_insert, rerank_query);
+
+    // Remap phrase_terms if needed
+    std::vector<uint32_t> remapped_phrase_terms;
+    const std::vector<uint32_t>* phrase_ptr = nullptr;
+    if (!search_param.phrase_terms.empty()) {
+        if (remap_term_ids_) {
+            for (auto t : search_param.phrase_terms) {
+                auto mapped = term_id_mapper_->TryMap(t);
+                if (mapped.has_value()) {
+                    remapped_phrase_terms.push_back(mapped.value());
+                }
+                // If a phrase term is unknown, filter can't pass — leave it out,
+                // check_phrase_constraint will fail due to missing positions
+            }
+            phrase_ptr = remapped_phrase_terms.empty() ? nullptr : &remapped_phrase_terms;
+        } else {
+            phrase_ptr = &search_param.phrase_terms;
+        }
+    }
+
+    return search_impl<KNN_SEARCH>(computer,
+                                   inner_param,
+                                   allocator,
+                                   search_param.use_term_lists_heap_insert,
+                                   rerank_query,
+                                   search_param.proximity_weight,
+                                   search_param.proximity_ordered,
+                                   search_param.proximity_candidates,
+                                   search_param.proximity_boost_multiplicative,
+                                   effective_query.len_,
+                                   phrase_ptr,
+                                   search_param.phrase_slop,
+                                   search_param.phrase_ordered);
 }
 
 std::optional<uint32_t>
@@ -710,7 +759,15 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                    const InnerSearchParam& inner_param,
                    Allocator* allocator,
                    bool use_term_lists_heap_insert,
-                   const SparseVector* original_query) const {
+                   const SparseVector* original_query,
+                   float proximity_weight,
+                   bool proximity_ordered,
+                   uint32_t proximity_candidates,
+                   bool proximity_boost_multiplicative,
+                   uint32_t query_term_count,
+                   const std::vector<uint32_t>* phrase_terms,
+                   uint32_t phrase_slop,
+                   bool phrase_ordered) const {
     // computer and heap
     MaxHeap heap(allocator);
     int64_t k = 0;
@@ -727,8 +784,101 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
         auto window_start_id = cur * window_size_;
         auto term_list = this->window_term_list_[cur];
 
-        // compute
-        term_list->Query(dists.data(), computer);
+        // compute IP scores, optionally record term offsets for proximity
+        std::vector<std::unordered_map<uint32_t, uint32_t>> doc_term_offsets;
+        if (store_positions_ && (proximity_weight > 0.0f ||
+                                 (phrase_terms != nullptr && !phrase_terms->empty()))) {
+            doc_term_offsets.resize(window_size_);
+            term_list->Query(dists.data(), computer, &doc_term_offsets);
+        } else {
+            term_list->Query(dists.data(), computer);
+        }
+
+        // phrase filter: discard candidates that don't satisfy phrase constraint
+        if (store_positions_ && phrase_terms != nullptr && !phrase_terms->empty()) {
+            for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
+                if (dists[doc_idx] >= 0.0f) {
+                    continue;
+                }
+                // Collect positions for phrase terms in this doc
+                std::vector<std::vector<uint16_t>> phrase_positions;
+                phrase_positions.reserve(phrase_terms->size());
+                bool all_present = true;
+                for (uint32_t pt : *phrase_terms) {
+                    auto it = doc_term_offsets[doc_idx].find(pt);
+                    if (it == doc_term_offsets[doc_idx].end() ||
+                        pt >= term_list->term_capacity_ || term_list->term_sizes_[pt] == 0 ||
+                        !term_list->term_pos_offsets_[pt]) {
+                        phrase_positions.emplace_back();
+                        all_present = false;
+                        break;
+                    }
+                    phrase_positions.push_back(term_list->GetPositions(pt, it->second));
+                }
+                if (!all_present ||
+                    !check_phrase_constraint(phrase_positions, phrase_slop, phrase_ordered)) {
+                    dists[doc_idx] = 0.0f;  // discard
+                }
+            }
+        }
+
+        // proximity boost: modify dists before heap insertion
+        if (store_positions_ && proximity_weight > 0.0f) {
+            const auto& raw_query = computer->raw_query_;
+
+            // Collect candidate doc_ids with non-zero scores, then keep top-N by IP score
+            std::vector<std::pair<float, uint32_t>> scored_candidates;
+            scored_candidates.reserve(window_size_);
+            for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
+                if (dists[doc_idx] < 0.0f) {
+                    scored_candidates.emplace_back(dists[doc_idx], doc_idx);
+                }
+            }
+            // Keep top-proximity_candidates by smallest dist (most negative = highest IP)
+            if (scored_candidates.size() > proximity_candidates) {
+                std::nth_element(scored_candidates.begin(),
+                                 scored_candidates.begin() + proximity_candidates,
+                                 scored_candidates.end(),
+                                 [](const auto& a, const auto& b) { return a.first < b.first; });
+                scored_candidates.resize(proximity_candidates);
+            }
+            std::vector<uint32_t> candidates;
+            candidates.reserve(scored_candidates.size());
+            for (const auto& p : scored_candidates) {
+                candidates.push_back(p.second);
+            }
+
+            // For each candidate, use recorded offsets to get positions (no binary search)
+            for (uint32_t doc_idx : candidates) {
+                std::vector<std::vector<uint16_t>> position_lists;
+                position_lists.reserve(raw_query.len_);
+
+                for (uint32_t qi = 0; qi < raw_query.len_; ++qi) {
+                    uint32_t term = raw_query.ids_[qi];
+                    auto it = doc_term_offsets[doc_idx].find(term);
+                    if (it == doc_term_offsets[doc_idx].end() ||
+                        term >= term_list->term_capacity_ || term_list->term_sizes_[term] == 0 ||
+                        !term_list->term_pos_offsets_[term]) {
+                        position_lists.emplace_back();
+                        continue;
+                    }
+                    position_lists.push_back(term_list->GetPositions(term, it->second));
+                }
+
+                float raw_boost = compute_pairwise_proximity(position_lists, proximity_ordered);
+                if (raw_boost > 0.0f) {
+                    // Normalize by C(query_term_count, 2)
+                    float pair_count = static_cast<float>(query_term_count) *
+                                       static_cast<float>(query_term_count - 1) / 2.0f;
+                    float normalized_boost = (pair_count > 0.0f) ? raw_boost / pair_count : 0.0f;
+                    if (proximity_boost_multiplicative) {
+                        dists[doc_idx] *= (1.0f + proximity_weight * normalized_boost);
+                    } else {
+                        dists[doc_idx] -= proximity_weight * normalized_boost;
+                    }
+                }
+            }
+        }
 
         // insert heap
         if (use_term_lists_heap_insert) {
@@ -863,8 +1013,37 @@ SINDI::RangeSearch(const DatasetPtr& query,
                                                    search_param.use_term_lists_heap_insert,
                                                    rerank_query);
     }
-    return search_impl<RANGE_SEARCH>(
-        computer, inner_param, allocator_, search_param.use_term_lists_heap_insert, rerank_query);
+
+    // Remap phrase_terms if needed
+    std::vector<uint32_t> remapped_phrase_terms_r;
+    const std::vector<uint32_t>* phrase_ptr_r = nullptr;
+    if (!search_param.phrase_terms.empty()) {
+        if (remap_term_ids_) {
+            for (auto t : search_param.phrase_terms) {
+                auto mapped = term_id_mapper_->TryMap(t);
+                if (mapped.has_value()) {
+                    remapped_phrase_terms_r.push_back(mapped.value());
+                }
+            }
+            phrase_ptr_r = remapped_phrase_terms_r.empty() ? nullptr : &remapped_phrase_terms_r;
+        } else {
+            phrase_ptr_r = &search_param.phrase_terms;
+        }
+    }
+
+    return search_impl<RANGE_SEARCH>(computer,
+                                     inner_param,
+                                     allocator_,
+                                     search_param.use_term_lists_heap_insert,
+                                     rerank_query,
+                                     search_param.proximity_weight,
+                                     search_param.proximity_ordered,
+                                     search_param.proximity_candidates,
+                                     search_param.proximity_boost_multiplicative,
+                                     effective_query.len_,
+                                     phrase_ptr_r,
+                                     search_param.phrase_slop,
+                                     search_param.phrase_ordered);
 }
 
 void
@@ -995,7 +1174,9 @@ SINDI::Deserialize(StreamReader& reader) {
                                                           term_id_limit_,
                                                           allocator_,
                                                           sparse_value_quant_type_,
-                                                          quantization_params_);
+                                                          quantization_params_,
+                                                          store_positions_,
+                                                          max_positions_per_term_);
             window->Deserialize(reader_ref);
         }
     }

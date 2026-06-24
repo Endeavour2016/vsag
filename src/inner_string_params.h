@@ -124,6 +124,15 @@ const char* const SPARSE_USE_TERM_LISTS_HEAP_INSERT = "use_term_lists_heap_inser
 const char* const SPARSE_AVG_DOC_TERM_LENGTH = "avg_doc_term_length";
 const char* const SPARSE_REMAP_TERM_IDS = "remap_term_ids";
 const char* const SPARSE_IMMUTABLE = "immutable";
+const char* const SPARSE_STORE_POSITIONS = "store_positions";
+const char* const SPARSE_MAX_POSITIONS_PER_TERM = "max_positions_per_term";
+const char* const SPARSE_PROXIMITY_CANDIDATES = "proximity_candidates";
+const char* const SPARSE_PROXIMITY_WEIGHT = "proximity_weight";
+const char* const SPARSE_PROXIMITY_ORDERED = "proximity_ordered";
+const char* const SPARSE_PROXIMITY_BOOST_MULTIPLICATIVE = "proximity_boost_multiplicative";
+const char* const SPARSE_PHRASE_TERMS = "phrase_terms";
+const char* const SPARSE_PHRASE_SLOP = "phrase_slop";
+const char* const SPARSE_PHRASE_ORDERED = "phrase_ordered";
 
 // graph param value
 const char* const GRAPH_PARAM_MAX_DEGREE_KEY = "max_degree";
