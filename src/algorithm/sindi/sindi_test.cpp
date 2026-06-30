@@ -2637,7 +2637,12 @@ TEST_CASE("SINDI Proximity Benchmark", "[ut][SINDI][Proximity][benchmark]") {
                 }
             }
 
-            float raw_boost = compute_pairwise_proximity(position_lists, false);
+            std::vector<PosSpan> position_spans;
+            position_spans.reserve(position_lists.size());
+            for (const auto& list : position_lists) {
+                position_spans.push_back(PosSpan{list.data(), static_cast<uint32_t>(list.size())});
+            }
+            float raw_boost = compute_pairwise_proximity(position_spans, false);
             float pair_count = static_cast<float>(q_ids_vec[qi].size()) *
                                static_cast<float>(q_ids_vec[qi].size() - 1) / 2.0f;
             float norm_boost = (pair_count > 0) ? raw_boost / pair_count : 0.0f;

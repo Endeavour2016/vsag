@@ -31,9 +31,7 @@ namespace {
 //   Forward (a < b): dist = b - a
 //   Reverse (a > b): dist = (a - b) * 2
 uint32_t
-min_distance_between_lists(const std::vector<uint16_t>& list_a,
-                           const std::vector<uint16_t>& list_b,
-                           bool ordered) {
+min_distance_between_lists(const PosSpan& list_a, const PosSpan& list_b, bool ordered) {
     uint32_t min_dist = std::numeric_limits<uint32_t>::max();
 
     // Both lists are expected to be in insertion order (ascending for positions
@@ -42,7 +40,7 @@ min_distance_between_lists(const std::vector<uint16_t>& list_a,
         // Unordered: classic sorted merge to find min |a - b|
         uint64_t i = 0;
         uint64_t j = 0;
-        while (i < list_a.size() && j < list_b.size()) {
+        while (i < list_a.size && j < list_b.size) {
             uint32_t a = list_a[i];
             uint32_t b = list_b[j];
             uint32_t dist = (a > b) ? (a - b) : (b - a);
@@ -83,7 +81,7 @@ min_distance_between_lists(const std::vector<uint16_t>& list_a,
 }  // namespace
 
 float
-compute_pairwise_proximity(const std::vector<std::vector<uint16_t>>& position_lists, bool ordered) {
+compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered) {
     float boost = 0.0f;
     uint64_t n = position_lists.size();
 

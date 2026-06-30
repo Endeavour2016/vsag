@@ -780,15 +780,29 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
     Vector<float> dists(window_size_, 0.0, allocator);
     auto filter = inner_param.is_inner_id_allowed;
     const auto [min_window_id, max_window_id] = this->get_min_max_window_id(filter);
+
+    // Reusable buffers for proximity/phrase position lookup. Hoisted out of the
+    // window loop so the per-window 5万-map allocation is paid once and reused
+    // via clear() instead of being rebuilt every window.
+    const bool need_offsets =
+        store_positions_ && (proximity_weight > 0.0f ||
+                             (phrase_terms != nullptr && !phrase_terms->empty()));
+    std::vector<std::unordered_map<uint32_t, uint32_t>> doc_term_offsets;
+    if (need_offsets) {
+        doc_term_offsets.resize(window_size_);
+    }
+    std::vector<std::pair<float, uint32_t>> scored_candidates;
+    std::vector<PosSpan> position_lists;
+
     for (auto cur = min_window_id; cur <= max_window_id; cur++) {
         auto window_start_id = cur * window_size_;
         auto term_list = this->window_term_list_[cur];
 
         // compute IP scores, optionally record term offsets for proximity
-        std::vector<std::unordered_map<uint32_t, uint32_t>> doc_term_offsets;
-        if (store_positions_ && (proximity_weight > 0.0f ||
-                                 (phrase_terms != nullptr && !phrase_terms->empty()))) {
-            doc_term_offsets.resize(window_size_);
+        if (need_offsets) {
+            for (auto& m : doc_term_offsets) {
+                m.clear();  // reuse buckets, do not rebuild
+            }
             term_list->Query(dists.data(), computer, &doc_term_offsets);
         } else {
             term_list->Query(dists.data(), computer);
@@ -827,8 +841,7 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
             const auto& raw_query = computer->raw_query_;
 
             // Collect candidate doc_ids with non-zero scores, then keep top-N by IP score
-            std::vector<std::pair<float, uint32_t>> scored_candidates;
-            scored_candidates.reserve(window_size_);
+            scored_candidates.clear();
             for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
                 if (dists[doc_idx] < 0.0f) {
                     scored_candidates.emplace_back(dists[doc_idx], doc_idx);
@@ -842,16 +855,13 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                                  [](const auto& a, const auto& b) { return a.first < b.first; });
                 scored_candidates.resize(proximity_candidates);
             }
-            std::vector<uint32_t> candidates;
-            candidates.reserve(scored_candidates.size());
-            for (const auto& p : scored_candidates) {
-                candidates.push_back(p.second);
-            }
 
-            // For each candidate, use recorded offsets to get positions (no binary search)
-            for (uint32_t doc_idx : candidates) {
-                std::vector<std::vector<uint16_t>> position_lists;
-                position_lists.reserve(raw_query.len_);
+            // For each candidate, use recorded offsets to get positions (no binary search).
+            // PosSpan elements point into term_list's position pool, which is read-only for
+            // the duration of this query, so the zero-copy views stay valid until consumed.
+            for (const auto& cand : scored_candidates) {
+                uint32_t doc_idx = cand.second;
+                position_lists.clear();
 
                 for (uint32_t qi = 0; qi < raw_query.len_; ++qi) {
                     uint32_t term = raw_query.ids_[qi];
@@ -862,7 +872,8 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                         position_lists.emplace_back();
                         continue;
                     }
-                    position_lists.push_back(term_list->GetPositions(term, it->second));
+                    auto [pos_data, pos_size] = term_list->GetPositionsView(term, it->second);
+                    position_lists.push_back(PosSpan{pos_data, pos_size});
                 }
 
                 float raw_boost = compute_pairwise_proximity(position_lists, proximity_ordered);

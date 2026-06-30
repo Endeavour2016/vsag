@@ -20,6 +20,31 @@
 
 namespace vsag {
 
+// Non-owning view over a contiguous, immutable position list. Used by the
+// proximity hot path to avoid per-candidate vector copies; the underlying data
+// lives in SparseTermDataCell::term_pos_pool_ and is read-only during a query.
+struct PosSpan {
+    const uint16_t* data{nullptr};
+    uint32_t size{0};
+
+    bool
+    empty() const {
+        return size == 0;
+    }
+    const uint16_t*
+    begin() const {
+        return data;
+    }
+    const uint16_t*
+    end() const {
+        return data + size;
+    }
+    uint16_t
+    operator[](uint32_t i) const {
+        return data[i];
+    }
+};
+
 // Compute pairwise proximity boost for a set of query terms' position lists.
 //
 // For each pair of terms (i, j) where i < j, finds the minimum distance between
@@ -30,7 +55,7 @@ namespace vsag {
 //
 // Returns 0.0 if fewer than 2 non-empty position lists are provided.
 float
-compute_pairwise_proximity(const std::vector<std::vector<uint16_t>>& position_lists, bool ordered);
+compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered);
 
 // Check if a set of terms satisfy a phrase constraint.
 //

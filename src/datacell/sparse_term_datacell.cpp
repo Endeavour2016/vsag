@@ -78,6 +78,7 @@ SparseTermDataCell::Query(float* global_dists,
             continue;
         }
 
+        // 对倒排链进行剪枝：term_retain_ratio_ - term_prune_ratio
         auto term_size = static_cast<uint32_t>(static_cast<float>(term_sizes_[term]) *
                                                computer->term_retain_ratio_);
 
@@ -663,6 +664,21 @@ SparseTermDataCell::GetPositions(uint32_t term_id, uint32_t posting_index) const
     uint32_t end = (posting_index + 1 < offsets.size()) ? offsets[posting_index + 1] : pool.size();
 
     return std::vector<uint16_t>(pool.begin() + start, pool.begin() + end);
+}
+
+std::pair<const uint16_t*, uint32_t>
+SparseTermDataCell::GetPositionsView(uint32_t term_id, uint32_t posting_index) const {
+    if (!store_positions_ || term_id >= term_capacity_ || !term_pos_offsets_[term_id] ||
+        posting_index >= term_pos_offsets_[term_id]->size()) {
+        return {nullptr, 0};
+    }
+
+    auto& offsets = *term_pos_offsets_[term_id];
+    auto& pool = *term_pos_pool_[term_id];
+    uint32_t start = offsets[posting_index];
+    uint32_t end = (posting_index + 1 < offsets.size()) ? offsets[posting_index + 1] : pool.size();
+
+    return {pool.data() + start, end - start};
 }
 
 void

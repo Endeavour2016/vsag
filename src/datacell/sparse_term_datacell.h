@@ -114,6 +114,13 @@ public:
     std::vector<uint16_t>
     GetPositions(uint32_t term_id, uint32_t posting_index) const;
 
+    // Zero-copy view into the position pool for a given term and doc posting
+    // index. Returns {data, size} pointing into term_pos_pool_; the data is
+    // valid for read only as long as the pool is not mutated (i.e. during a
+    // query). Returns {nullptr, 0} if positions are not stored or not found.
+    std::pair<const uint16_t*, uint32_t>
+    GetPositionsView(uint32_t term_id, uint32_t posting_index) const;
+
     void
     ResizeTermList(InnerIdType new_term_capacity);
 
