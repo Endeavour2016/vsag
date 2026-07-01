@@ -55,15 +55,26 @@ def serialize_sparse_vectors(vectors):
 
 
 def serialize_token_sequences(vectors):
-    """Serialize token sequences: [seq_len(uint32), token_ids(uint32 x seq_len), ...]"""
+    """Serialize token sequences: [seq_len(uint32), token_ids(uint32 x seq_len), ...]
+
+    Returns (blob, offsets) where offsets follows the [0, ..., total] contract:
+    length N+1, offsets[i] is the byte start of record i, offsets[N] is the
+    total byte length. The loader requires this companion dataset whenever
+    train/test_token_sequences is present.
+    """
     parts = []
+    offsets = [0]
+    total = 0
     for _, _, token_seq in vectors:
         if token_seq is None or len(token_seq) == 0:
-            parts.append(struct.pack('<I', 0))
+            record = struct.pack('<I', 0)
         else:
-            parts.append(struct.pack('<I', len(token_seq)))
-            parts.append(token_seq.astype(np.uint32).tobytes())
-    return np.frombuffer(b''.join(parts), dtype=np.uint8)
+            record = struct.pack('<I', len(token_seq)) + token_seq.astype(np.uint32).tobytes()
+        parts.append(record)
+        total += len(record)
+        offsets.append(total)
+    blob = np.frombuffer(b''.join(parts), dtype=np.uint8)
+    return blob, np.array(offsets, dtype=np.uint64)
 
 
 def compute_ip(q_ids, q_vals, d_ids, d_vals):
@@ -209,12 +220,13 @@ def main():
     train_blob = serialize_sparse_vectors(base_docs)
     test_blob = serialize_sparse_vectors(
         [(q[0], q[1], np.array([], dtype=np.uint32)) for q in queries])
-    train_seq_blob = serialize_token_sequences(base_docs)
+    train_seq_blob, train_seq_offsets = serialize_token_sequences(base_docs)
 
     with h5py.File(args.output, 'w') as f:
         f.create_dataset('train', data=train_blob)
         f.create_dataset('test', data=test_blob)
         f.create_dataset('train_token_sequences', data=train_seq_blob)
+        f.create_dataset('train_token_sequences_offsets', data=train_seq_offsets)
         f.create_dataset('neighbors', data=neighbors)
         f.create_dataset('distances', data=distances)
         f.attrs['distance'] = 'ip'
