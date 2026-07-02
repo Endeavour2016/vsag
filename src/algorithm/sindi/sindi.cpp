@@ -18,10 +18,14 @@
 #include "analyzer/analyzer.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
 #include "impl/heap/standard_heap.h"
 #include "index_feature_list.h"
 #include "simd/fp16_simd.h"
 #include "storage/serialization.h"
+#include "utils/timer.h"
 #include "utils/util_functions.h"
 #include "vsag/allocator.h"
 #include "vsag_exception.h"
@@ -781,6 +785,40 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
     auto filter = inner_param.is_inner_id_allowed;
     const auto [min_window_id, max_window_id] = this->get_min_max_window_id(filter);
 
+    // Timing instrumentation, gated by env SINDI_PROFILE. Accumulators are in
+    // milliseconds (Timer::Record returns ms); printed as microseconds. The
+    // guard prints one line per query regardless of which return path is taken.
+    static const bool kSindiProfile = (std::getenv("SINDI_PROFILE") != nullptr);
+    double prof_resize = 0.0, prof_clear = 0.0, prof_scan = 0.0, prof_phrase = 0.0;
+    double prof_cand = 0.0, prof_prox = 0.0, prof_heap = 0.0, prof_rerank = 0.0;
+    struct ProfileGuard {
+        bool on;
+        const double *resize, *clear, *scan, *phrase, *cand, *prox, *heap, *rerank;
+        ~ProfileGuard() {
+            if (on) {
+                fprintf(stderr,
+                        "[SINDI_PROF] resize=%.1f clear=%.1f scan=%.1f phrase=%.1f "
+                        "cand=%.1f prox=%.1f heap=%.1f rerank=%.1f (us)\n",
+                        *resize * 1000.0,
+                        *clear * 1000.0,
+                        *scan * 1000.0,
+                        *phrase * 1000.0,
+                        *cand * 1000.0,
+                        *prox * 1000.0,
+                        *heap * 1000.0,
+                        *rerank * 1000.0);
+            }
+        }
+    } prof_guard{kSindiProfile,
+                 &prof_resize,
+                 &prof_clear,
+                 &prof_scan,
+                 &prof_phrase,
+                 &prof_cand,
+                 &prof_prox,
+                 &prof_heap,
+                 &prof_rerank};
+
     // Reusable buffers for proximity/phrase position lookup. Hoisted out of the
     // window loop so the per-window 5万-map allocation is paid once and reused
     // via clear() instead of being rebuilt every window.
@@ -789,7 +827,9 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                              (phrase_terms != nullptr && !phrase_terms->empty()));
     std::vector<std::unordered_map<uint32_t, uint32_t>> doc_term_offsets;
     if (need_offsets) {
+        Timer t;
         doc_term_offsets.resize(window_size_);
+        prof_resize += t.Record();
     }
     std::vector<std::pair<float, uint32_t>> scored_candidates;
     std::vector<PosSpan> position_lists;
@@ -800,16 +840,54 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
 
         // compute IP scores, optionally record term offsets for proximity
         if (need_offsets) {
-            for (auto& m : doc_term_offsets) {
-                m.clear();  // reuse buckets, do not rebuild
+            {
+                Timer t;
+                for (auto& m : doc_term_offsets) {
+                    m.clear();  // reuse buckets, do not rebuild
+                }
+                prof_clear += t.Record();
             }
-            term_list->Query(dists.data(), computer, &doc_term_offsets);
+            {
+                Timer t;
+                term_list->Query(dists.data(), computer, &doc_term_offsets);
+                prof_scan += t.Record();
+            }
         } else {
+            Timer t;
             term_list->Query(dists.data(), computer);
+            prof_scan += t.Record();
+        }
+
+        // Debug: confirm the scan actually matched docs and accumulated scores.
+        // Gated by env SINDI_DEBUG_QUERY. dist = -ip, so matched docs have dist < 0
+        // (more negative = higher inner product).
+        static const bool kSindiDebugQuery = (std::getenv("SINDI_DEBUG_QUERY") != nullptr);
+        if (kSindiDebugQuery) {
+            uint32_t matched = 0;
+            float best_dist = 0.0f;
+            uint32_t best_doc = 0;
+            for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
+                if (dists[doc_idx] < 0.0f) {
+                    ++matched;
+                    if (dists[doc_idx] < best_dist) {
+                        best_dist = dists[doc_idx];
+                        best_doc = doc_idx;
+                    }
+                }
+            }
+            fprintf(stderr,
+                    "[SINDI_DBG] window=%ld query_terms=%u matched_docs=%u "
+                    "best_inner_id=%u best_ip=%.4f\n",
+                    static_cast<long>(cur),
+                    computer->raw_query_.len_,
+                    matched,
+                    matched > 0 ? best_doc + static_cast<uint32_t>(window_start_id) : 0u,
+                    matched > 0 ? -best_dist : 0.0f);
         }
 
         // phrase filter: discard candidates that don't satisfy phrase constraint
         if (store_positions_ && phrase_terms != nullptr && !phrase_terms->empty()) {
+            Timer t;
             for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
                 if (dists[doc_idx] >= 0.0f) {
                     continue;
@@ -834,12 +912,14 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     dists[doc_idx] = 0.0f;  // discard
                 }
             }
+            prof_phrase += t.Record();
         }
 
         // proximity boost: modify dists before heap insertion
         if (store_positions_ && proximity_weight > 0.0f) {
             const auto& raw_query = computer->raw_query_;
 
+            Timer t_cand;
             // Collect candidate doc_ids with non-zero scores, then keep top-N by IP score
             scored_candidates.clear();
             for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
@@ -855,10 +935,15 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                                  [](const auto& a, const auto& b) { return a.first < b.first; });
                 scored_candidates.resize(proximity_candidates);
             }
+            prof_cand += t_cand.Record();
 
             // For each candidate, use recorded offsets to get positions (no binary search).
             // PosSpan elements point into term_list's position pool, which is read-only for
             // the duration of this query, so the zero-copy views stay valid until consumed.
+            Timer t_prox;
+            static const bool kSindiDebugQuery = (std::getenv("SINDI_DEBUG_QUERY") != nullptr);
+            uint32_t boosted = 0;
+            float max_boost = 0.0f;
             for (const auto& cand : scored_candidates) {
                 uint32_t doc_idx = cand.second;
                 position_lists.clear();
@@ -887,11 +972,26 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     } else {
                         dists[doc_idx] -= proximity_weight * normalized_boost;
                     }
+                    ++boosted;
+                    if (normalized_boost > max_boost) {
+                        max_boost = normalized_boost;
+                    }
                 }
+            }
+            prof_prox += t_prox.Record();
+            if (kSindiDebugQuery) {
+                fprintf(stderr,
+                        "[SINDI_DBG] window=%ld proximity candidates=%zu boosted=%u "
+                        "max_norm_boost=%.4f\n",
+                        static_cast<long>(cur),
+                        scored_candidates.size(),
+                        boosted,
+                        max_boost);
             }
         }
 
         // insert heap
+        Timer t_heap;
         if (use_term_lists_heap_insert) {
             if (inner_param.is_inner_id_allowed) {
                 term_list->InsertHeapByTermLists<mode, WITH_FILTER>(
@@ -909,9 +1009,13 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     dists.data(), dists.size(), heap, inner_param, window_start_id);
             }
         }
+        prof_heap += t_heap.Record();
     }
 
-    // rerank
+    // rerank. Ref-based Timer writes prof_rerank on destruction; declared after
+    // prof_guard so it unwinds first and the value is set before the guard prints,
+    // covering all of this function's return paths (rerank / empty / low-precision).
+    Timer t_rerank(&prof_rerank);
     if (use_reorder_) {
         // high precision
         float cur_heap_top = std::numeric_limits<float>::max();
