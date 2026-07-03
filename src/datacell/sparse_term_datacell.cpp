@@ -83,33 +83,20 @@ SparseTermDataCell::Query(float* global_dists,
                                                computer->term_retain_ratio_);
 
         if (sparse_value_quant_type_ == SparseValueQuantizationType::SQ8) {
-            // Quantization path: use ScanForAccumulate, then record offsets separately
             computer->ScanForAccumulate(
                 it, term_ids_[term]->data(), term_datas_[term]->data(), term_size, global_dists);
-            // Record offsets for all docs in this term's posting list
-            auto& term_ids = *term_ids_[term];
-            for (uint32_t i = 0; i < term_size; ++i) {
-                (*doc_term_offsets)[term_ids[i]][term] = i;
-            }
         } else if (sparse_value_quant_type_ == SparseValueQuantizationType::FP16) {
-            // FP16 path: use ScanForAccumulateFP16Bytes, then record offsets separately
             computer->ScanForAccumulateFP16Bytes(
                 it, term_ids_[term]->data(), term_datas_[term]->data(), term_size, global_dists);
-            // Record offsets for all docs in this term's posting list
-            auto& term_ids = *term_ids_[term];
-            for (uint32_t i = 0; i < term_size; ++i) {
-                (*doc_term_offsets)[term_ids[i]][term] = i;
-            }
         } else {
-            // Non-quantization path: expand loop to record offsets inline
-            float query_val = computer->sorted_query_[it].second;
-            auto& term_ids = *term_ids_[term];
-            auto* term_vals = reinterpret_cast<const float*>(term_datas_[term]->data());
-            for (uint32_t i = 0; i < term_size; ++i) {
-                uint16_t doc_id = term_ids[i];
-                global_dists[doc_id] += query_val * term_vals[i];
-                (*doc_term_offsets)[doc_id][term] = i;
-            }
+            computer->ScanForAccumulateFloatBytes(
+                it, term_ids_[term]->data(), term_datas_[term]->data(), term_size, global_dists);
+        }
+
+        // Record offsets for all docs in this term's posting list
+        auto& term_ids = *term_ids_[term];
+        for (uint32_t i = 0; i < term_size; ++i) {
+            (*doc_term_offsets)[term_ids[i]][term] = i;
         }
     }
     computer->ResetTerm();
