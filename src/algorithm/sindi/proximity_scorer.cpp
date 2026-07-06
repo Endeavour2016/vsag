@@ -104,6 +104,26 @@ compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool orde
     return boost;
 }
 
+float
+calculate_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered) {
+    float boost = 0.0f;
+    uint64_t n = position_lists.size();
+
+    // Only score adjacent pairs (i, i+1) in query order → n-1 pairs.
+    for (uint64_t i = 0; i + 1 < n; ++i) {
+        if (position_lists[i].empty() || position_lists[i + 1].empty()) {
+            continue;
+        }
+        uint32_t dist =
+            min_distance_between_lists(position_lists[i], position_lists[i + 1], ordered);
+        if (dist < std::numeric_limits<uint32_t>::max()) {
+            boost += 1.0f / static_cast<float>(dist + 1);
+        }
+    }
+
+    return boost;
+}
+
 bool
 check_phrase_constraint(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
                         uint32_t slop,
@@ -207,6 +227,67 @@ check_phrase_constraint(const std::vector<std::vector<uint16_t>>& phrase_term_po
         }
         return false;
     }
+}
+
+bool
+check_phrase_constraint_sloppy(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
+                               uint32_t slop) {
+    uint64_t n = phrase_term_positions.size();
+    if (n <= 1) {
+        return true;
+    }
+
+    // All terms must be present.
+    for (uint64_t i = 0; i < n; ++i) {
+        if (phrase_term_positions[i].empty()) {
+            return false;
+        }
+    }
+
+    // Normalize each position by its query offset (term index): norm = pos - i.
+    // Reversals produce smaller/negative norms, widening the window (i.e. they
+    // cost extra slop) exactly as Lucene's SloppyPhraseMatcher does.
+    struct NormEntry {
+        int32_t norm;
+        uint64_t term_idx;
+    };
+    std::vector<NormEntry> all_norms;
+    for (uint64_t i = 0; i < n; ++i) {
+        for (auto pos : phrase_term_positions[i]) {
+            all_norms.push_back({static_cast<int32_t>(pos) - static_cast<int32_t>(i), i});
+        }
+    }
+    std::sort(all_norms.begin(), all_norms.end(), [](const NormEntry& a, const NormEntry& b) {
+        return a.norm < b.norm;
+    });
+
+    // Sliding window over sorted norms: find the smallest window covering all n
+    // terms; pass if any such window has (max_norm - min_norm) <= slop.
+    std::vector<uint32_t> term_count(n, 0);
+    uint64_t terms_covered = 0;
+    uint64_t left = 0;
+
+    for (uint64_t right = 0; right < all_norms.size(); ++right) {
+        auto idx = all_norms[right].term_idx;
+        if (term_count[idx] == 0) {
+            terms_covered++;
+        }
+        term_count[idx]++;
+
+        while (terms_covered == n) {
+            int32_t distance = all_norms[right].norm - all_norms[left].norm;
+            if (distance <= static_cast<int32_t>(slop)) {
+                return true;
+            }
+            auto left_idx = all_norms[left].term_idx;
+            term_count[left_idx]--;
+            if (term_count[left_idx] == 0) {
+                terms_covered--;
+            }
+            left++;
+        }
+    }
+    return false;
 }
 
 void

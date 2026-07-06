@@ -389,9 +389,11 @@ SINDI::KnnSearch(const DatasetPtr& query,
                                    search_param.proximity_candidates,
                                    search_param.proximity_boost_multiplicative,
                                    effective_query.len_,
+                                   search_param.proximity_adjacent_only,
                                    phrase_ptr,
                                    search_param.phrase_slop,
-                                   search_param.phrase_ordered);
+                                   search_param.phrase_ordered,
+                                   search_param.phrase_use_sloppy);
 }
 
 std::optional<uint32_t>
@@ -769,9 +771,11 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                    uint32_t proximity_candidates,
                    bool proximity_boost_multiplicative,
                    uint32_t query_term_count,
+                   bool proximity_adjacent_only,
                    const std::vector<uint32_t>* phrase_terms,
                    uint32_t phrase_slop,
-                   bool phrase_ordered) const {
+                   bool phrase_ordered,
+                   bool phrase_use_sloppy) const {
     // computer and heap
     MaxHeap heap(allocator);
     int64_t k = 0;
@@ -907,8 +911,12 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     }
                     phrase_positions.push_back(term_list->GetPositions(pt, it->second));
                 }
-                if (!all_present ||
-                    !check_phrase_constraint(phrase_positions, phrase_slop, phrase_ordered)) {
+                bool phrase_ok =
+                    all_present &&
+                    (phrase_use_sloppy
+                         ? check_phrase_constraint_sloppy(phrase_positions, phrase_slop)
+                         : check_phrase_constraint(phrase_positions, phrase_slop, phrase_ordered));
+                if (!phrase_ok) {
                     dists[doc_idx] = 0.0f;  // discard
                 }
             }
@@ -961,11 +969,18 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     position_lists.push_back(PosSpan{pos_data, pos_size});
                 }
 
-                float raw_boost = compute_pairwise_proximity(position_lists, proximity_ordered);
+                float raw_boost =
+                    proximity_adjacent_only
+                        ? calculate_pairwise_proximity(position_lists, proximity_ordered)
+                        : compute_pairwise_proximity(position_lists, proximity_ordered);
                 if (raw_boost > 0.0f) {
-                    // Normalize by C(query_term_count, 2)
-                    float pair_count = static_cast<float>(query_term_count) *
-                                       static_cast<float>(query_term_count - 1) / 2.0f;
+                    // Normalize by the number of scored pairs: n-1 for adjacent-only,
+                    // C(query_term_count, 2) otherwise.
+                    float pair_count =
+                        proximity_adjacent_only
+                            ? static_cast<float>(query_term_count - 1)
+                            : static_cast<float>(query_term_count) *
+                                  static_cast<float>(query_term_count - 1) / 2.0f;
                     float normalized_boost = (pair_count > 0.0f) ? raw_boost / pair_count : 0.0f;
                     if (proximity_boost_multiplicative) {
                         dists[doc_idx] *= (1.0f + proximity_weight * normalized_boost);
@@ -1156,9 +1171,11 @@ SINDI::RangeSearch(const DatasetPtr& query,
                                      search_param.proximity_candidates,
                                      search_param.proximity_boost_multiplicative,
                                      effective_query.len_,
+                                     search_param.proximity_adjacent_only,
                                      phrase_ptr_r,
                                      search_param.phrase_slop,
-                                     search_param.phrase_ordered);
+                                     search_param.phrase_ordered,
+                                     search_param.phrase_use_sloppy);
 }
 
 void

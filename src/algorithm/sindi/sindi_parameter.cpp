@@ -219,6 +219,10 @@ SINDISearchParameter::FromJson(const JsonType& json) {
             json[INDEX_SINDI][SPARSE_PROXIMITY_BOOST_MULTIPLICATIVE].GetBool();
     }
 
+    if (json[INDEX_SINDI].Contains(SPARSE_PROXIMITY_ADJACENT_ONLY)) {
+        proximity_adjacent_only = json[INDEX_SINDI][SPARSE_PROXIMITY_ADJACENT_ONLY].GetBool();
+    }
+
     if (json[INDEX_SINDI].Contains(SPARSE_PHRASE_TERMS) &&
         json[INDEX_SINDI][SPARSE_PHRASE_TERMS].IsArray()) {
         auto terms_i32 = json[INDEX_SINDI][SPARSE_PHRASE_TERMS].GetVector();
@@ -236,6 +240,10 @@ SINDISearchParameter::FromJson(const JsonType& json) {
     if (json[INDEX_SINDI].Contains(SPARSE_PHRASE_ORDERED)) {
         phrase_ordered = json[INDEX_SINDI][SPARSE_PHRASE_ORDERED].GetBool();
     }
+
+    if (json[INDEX_SINDI].Contains(SPARSE_PHRASE_USE_SLOPPY)) {
+        phrase_use_sloppy = json[INDEX_SINDI][SPARSE_PHRASE_USE_SLOPPY].GetBool();
+    }
 }
 JsonType
 SINDISearchParameter::ToJson() const {
@@ -250,6 +258,8 @@ SINDISearchParameter::ToJson() const {
     json[INDEX_SINDI][SPARSE_PROXIMITY_ORDERED].SetBool(proximity_ordered);
     json[INDEX_SINDI][SPARSE_PROXIMITY_BOOST_MULTIPLICATIVE].SetBool(
         proximity_boost_multiplicative);
+    json[INDEX_SINDI][SPARSE_PROXIMITY_ADJACENT_ONLY].SetBool(proximity_adjacent_only);
+    json[INDEX_SINDI][SPARSE_PHRASE_USE_SLOPPY].SetBool(phrase_use_sloppy);
     return json;
 }
 

@@ -147,6 +147,39 @@ TEST_CASE("ProximityScorer Empty Position List Skipped", "[ut][ProximityScorer]"
     REQUIRE(boost == 0.0f);
 }
 
+// ===== calculate_pairwise_proximity (adjacent-only) tests =====
+
+TEST_CASE("CalcProximity Adjacent Only Three Terms", "[ut][ProximityScorer]") {
+    // A at 0, B at 1, C at 10. Adjacent pairs: (A,B) dist=1 → 0.5,
+    // (B,C) dist=9 → 0.1. (A,C) is NOT scored. Total = 0.6.
+    // compute_pairwise_proximity would also add (A,C) dist=10 → 1/11 ≈ 0.0909.
+    std::vector<std::vector<uint16_t>> positions = {{0}, {1}, {10}};
+    float adj = calculate_pairwise_proximity(to_spans(positions), false);
+    REQUIRE_APPROX(adj, 0.5f + 0.1f);
+    float all = compute_pairwise_proximity(to_spans(positions), false);
+    REQUIRE(all > adj);  // all-pairs includes the extra (A,C) contribution
+}
+
+TEST_CASE("CalcProximity Adjacent Only Empty Term Skipped", "[ut][ProximityScorer]") {
+    // B empty → both (A,B) and (B,C) skipped → boost 0.
+    std::vector<std::vector<uint16_t>> positions = {{0}, {}, {2}};
+    float boost = calculate_pairwise_proximity(to_spans(positions), false);
+    REQUIRE(boost == 0.0f);
+}
+
+TEST_CASE("CalcProximity Adjacent Only Single Term", "[ut][ProximityScorer]") {
+    std::vector<std::vector<uint16_t>> single = {{5, 10}};
+    float boost = calculate_pairwise_proximity(to_spans(single), false);
+    REQUIRE(boost == 0.0f);
+}
+
+TEST_CASE("CalcProximity Adjacent Only Ordered Reverse Penalty", "[ut][ProximityScorer]") {
+    // A at 5, B at 2. Ordered reverse: dist = (5-2)*2 = 6 → 1/7.
+    std::vector<std::vector<uint16_t>> positions = {{5}, {2}};
+    float boost = calculate_pairwise_proximity(to_spans(positions), true);
+    REQUIRE_APPROX(boost, 1.0f / 7.0f);
+}
+
 // ===== check_phrase_constraint tests =====
 
 TEST_CASE("PhraseFilter All Terms Present Within Slop", "[ut][ProximityScorer][PhraseFilter]") {
@@ -220,6 +253,47 @@ TEST_CASE("PhraseFilter Three Terms Ordered Fail", "[ut][ProximityScorer][Phrase
     // Only valid ordered combo: A=2, B=5, C=? → C must be > 5, but C only at 3 → fail
     std::vector<std::vector<uint16_t>> positions = {{2}, {5}, {3}};
     REQUIRE(check_phrase_constraint(positions, 3, true) == false);
+}
+
+// ===== check_phrase_constraint_sloppy (Lucene normalized slop) tests =====
+
+TEST_CASE("SloppyPhrase Forward Distance Two", "[ut][ProximityScorer][PhraseFilter]") {
+    // query offsets [0,1,2], doc pos [0,2,4] → norms [0,1,2] → distance=2.
+    // (Aligns with lucene_sloppy_freq_algo.md example 1.)
+    std::vector<std::vector<uint16_t>> positions = {{0}, {2}, {4}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 2) == true);
+    REQUIRE(check_phrase_constraint_sloppy(positions, 1) == false);
+}
+
+TEST_CASE("SloppyPhrase Reverse Costs More Slop", "[ut][ProximityScorer][PhraseFilter]") {
+    // query offsets [0,1,2], doc pos [4,2,0] → norms [4,1,-2] → distance=6.
+    // (Aligns with lucene_sloppy_freq_algo.md example 2.)
+    std::vector<std::vector<uint16_t>> positions = {{4}, {2}, {0}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 6) == true);
+    REQUIRE(check_phrase_constraint_sloppy(positions, 5) == false);
+}
+
+TEST_CASE("SloppyPhrase Exact Adjacent", "[ut][ProximityScorer][PhraseFilter]") {
+    // doc pos [0,1] → norms [0,0] → distance=0 → slop=0 passes.
+    std::vector<std::vector<uint16_t>> positions = {{0}, {1}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 0) == true);
+}
+
+TEST_CASE("SloppyPhrase Missing Term", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{0}, {}, {2}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 100) == false);
+}
+
+TEST_CASE("SloppyPhrase Single Term Passes", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{5}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 0) == true);
+}
+
+TEST_CASE("SloppyPhrase Multiple Positions Best Window", "[ut][ProximityScorer][PhraseFilter]") {
+    // A at [0, 10], B at [3, 11]. query offsets [0,1].
+    // norms: A → {0, 10}, B → {2, 10}. Window {10,10} → distance=0 → slop=0 passes.
+    std::vector<std::vector<uint16_t>> positions = {{0, 10}, {3, 11}};
+    REQUIRE(check_phrase_constraint_sloppy(positions, 0) == true);
 }
 
 // ===== extract_positions_from_token_sequence tests =====

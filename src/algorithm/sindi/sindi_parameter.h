@@ -99,11 +99,15 @@ public:
     float proximity_weight{0.0f};
     bool proximity_ordered{false};
     bool proximity_boost_multiplicative{true};  // true=multiplicative, false=additive
+    // true → adjacent-only pairs (n-1), false → all pairs C(n,2)
+    bool proximity_adjacent_only{false};
 
     // phrase filter
     std::vector<uint32_t> phrase_terms;
     uint32_t phrase_slop{0};
     bool phrase_ordered{false};
+    // true → Lucene-normalized sloppy matcher, false → legacy ordered/unordered
+    bool phrase_use_sloppy{false};
 };
 
 }  // namespace vsag

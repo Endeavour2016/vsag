@@ -57,6 +57,18 @@ struct PosSpan {
 float
 compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered);
 
+// Simplified proximity boost that only scores adjacent query-term pairs.
+//
+// Unlike compute_pairwise_proximity (which scores all C(n,2) pairs), this scores
+// only the n-1 pairs (i, i+1), where adjacency follows the order of
+// position_lists (i.e. the query's raw_query_.ids_ order). For query ABC it
+// scores (A,B) and (B,C) but not (A,C).
+//
+// The ordered flag and per-pair distance/boost semantics match
+// compute_pairwise_proximity. Empty position lists contribute nothing.
+float
+calculate_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered);
+
 // Check if a set of terms satisfy a phrase constraint.
 //
 // All terms in phrase_term_positions must be present (non-empty position list).
@@ -68,6 +80,20 @@ bool
 check_phrase_constraint(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
                         uint32_t slop,
                         bool ordered);
+
+// Phrase constraint using Lucene SloppyPhraseMatcher's normalized-window slop.
+//
+// Each term's positions are normalized by their query offset (the term's index
+// in phrase_term_positions): norm = doc_pos - term_idx. The match distance is
+// max(norm) - min(norm) over a window covering one position per term; the
+// constraint passes if any such window has distance <= slop. This encodes order
+// into the offsets (reversals cost extra slop) so there is no ordered/unordered
+// distinction. Returns true as soon as one satisfying window is found.
+//
+// All terms must be present (non-empty). Returns true for 0 or 1 terms.
+bool
+check_phrase_constraint_sloppy(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
+                               uint32_t slop);
 
 // Extract per-term positions from a raw token sequence.
 //
