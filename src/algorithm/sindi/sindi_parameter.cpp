@@ -244,6 +244,10 @@ SINDISearchParameter::FromJson(const JsonType& json) {
     if (json[INDEX_SINDI].Contains(SPARSE_PHRASE_USE_SLOPPY)) {
         phrase_use_sloppy = json[INDEX_SINDI][SPARSE_PHRASE_USE_SLOPPY].GetBool();
     }
+
+    if (json[INDEX_SINDI].Contains(SPARSE_PHRASE_MOCK_TOP_K)) {
+        phrase_mock_top_k = json[INDEX_SINDI][SPARSE_PHRASE_MOCK_TOP_K].GetInt();
+    }
 }
 JsonType
 SINDISearchParameter::ToJson() const {
@@ -260,6 +264,7 @@ SINDISearchParameter::ToJson() const {
         proximity_boost_multiplicative);
     json[INDEX_SINDI][SPARSE_PROXIMITY_ADJACENT_ONLY].SetBool(proximity_adjacent_only);
     json[INDEX_SINDI][SPARSE_PHRASE_USE_SLOPPY].SetBool(phrase_use_sloppy);
+    json[INDEX_SINDI][SPARSE_PHRASE_MOCK_TOP_K].SetInt(phrase_mock_top_k);
     return json;
 }
 

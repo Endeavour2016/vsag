@@ -135,6 +135,7 @@ const char* const SPARSE_PHRASE_TERMS = "phrase_terms";
 const char* const SPARSE_PHRASE_SLOP = "phrase_slop";
 const char* const SPARSE_PHRASE_ORDERED = "phrase_ordered";
 const char* const SPARSE_PHRASE_USE_SLOPPY = "phrase_use_sloppy";
+const char* const SPARSE_PHRASE_MOCK_TOP_K = "phrase_mock_top_k";
 
 // graph param value
 const char* const GRAPH_PARAM_MAX_DEGREE_KEY = "max_degree";

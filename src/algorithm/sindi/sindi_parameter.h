@@ -108,6 +108,8 @@ public:
     bool phrase_ordered{false};
     // true → Lucene-normalized sloppy matcher, false → legacy ordered/unordered
     bool phrase_use_sloppy{false};
+    // >0 且未显式传 phrase_terms 时,取 top-k 权重 term 作 mock(本地压测用)
+    uint32_t phrase_mock_top_k{0};
 };
 
 }  // namespace vsag

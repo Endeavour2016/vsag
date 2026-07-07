@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <numeric>
 
 #include "impl/heap/standard_heap.h"
 #include "index_feature_list.h"
@@ -377,6 +378,21 @@ SINDI::KnnSearch(const DatasetPtr& query,
         } else {
             phrase_ptr = &search_param.phrase_terms;
         }
+    } else if (search_param.phrase_mock_top_k > 0 && effective_query.len_ > 0) {
+        // 本地压测用:从已 remap 的 query 取 top-k 高权重 term 作 mock phrase_terms
+        uint32_t k = std::min<uint32_t>(search_param.phrase_mock_top_k, effective_query.len_);
+        std::vector<uint32_t> idx(effective_query.len_);
+        std::iota(idx.begin(), idx.end(), 0U);
+        std::partial_sort(
+            idx.begin(), idx.begin() + k, idx.end(), [&](uint32_t a, uint32_t b) {
+                return effective_query.vals_[a] > effective_query.vals_[b];  // 权重降序取 top-k
+            });
+        remapped_phrase_terms.assign(k, 0);
+        for (uint32_t i = 0; i < k; ++i) {
+            remapped_phrase_terms[i] = effective_query.ids_[idx[i]];
+        }
+        std::sort(remapped_phrase_terms.begin(), remapped_phrase_terms.end());  // term_id 升序
+        phrase_ptr = remapped_phrase_terms.empty() ? nullptr : &remapped_phrase_terms;
     }
 
     return search_impl<KNN_SEARCH>(computer,
@@ -892,10 +908,13 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
         // phrase filter: discard candidates that don't satisfy phrase constraint
         if (store_positions_ && phrase_terms != nullptr && !phrase_terms->empty()) {
             Timer t;
+            uint32_t phrase_candidates = 0;
+            uint32_t phrase_discarded = 0;
             for (uint32_t doc_idx = 0; doc_idx < window_size_; ++doc_idx) {
                 if (dists[doc_idx] >= 0.0f) {
                     continue;
                 }
+                ++phrase_candidates;
                 // Collect positions for phrase terms in this doc
                 std::vector<std::vector<uint16_t>> phrase_positions;
                 phrase_positions.reserve(phrase_terms->size());
@@ -918,9 +937,23 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                          : check_phrase_constraint(phrase_positions, phrase_slop, phrase_ordered));
                 if (!phrase_ok) {
                     dists[doc_idx] = 0.0f;  // discard
+                    ++phrase_discarded;
                 }
             }
             prof_phrase += t.Record();
+            if (kSindiDebugQuery) {
+                uint32_t survivors = phrase_candidates - phrase_discarded;
+                fprintf(stderr,
+                        "[SINDI_DBG] window=%ld phrase_candidates=%u survivors=%u "
+                        "discarded=%u survival_rate=%.4f\n",
+                        static_cast<long>(cur),
+                        phrase_candidates,
+                        survivors,
+                        phrase_discarded,
+                        phrase_candidates > 0
+                            ? static_cast<float>(survivors) / static_cast<float>(phrase_candidates)
+                            : 0.0f);
+            }
         }
 
         // proximity boost: modify dists before heap insertion
@@ -1159,6 +1192,21 @@ SINDI::RangeSearch(const DatasetPtr& query,
         } else {
             phrase_ptr_r = &search_param.phrase_terms;
         }
+    } else if (search_param.phrase_mock_top_k > 0 && effective_query.len_ > 0) {
+        // 本地压测用:从已 remap 的 query 取 top-k 高权重 term 作 mock phrase_terms
+        uint32_t k = std::min<uint32_t>(search_param.phrase_mock_top_k, effective_query.len_);
+        std::vector<uint32_t> idx(effective_query.len_);
+        std::iota(idx.begin(), idx.end(), 0U);
+        std::partial_sort(
+            idx.begin(), idx.begin() + k, idx.end(), [&](uint32_t a, uint32_t b) {
+                return effective_query.vals_[a] > effective_query.vals_[b];  // 权重降序取 top-k
+            });
+        remapped_phrase_terms_r.assign(k, 0);
+        for (uint32_t i = 0; i < k; ++i) {
+            remapped_phrase_terms_r[i] = effective_query.ids_[idx[i]];
+        }
+        std::sort(remapped_phrase_terms_r.begin(), remapped_phrase_terms_r.end());  // term_id 升序
+        phrase_ptr_r = remapped_phrase_terms_r.empty() ? nullptr : &remapped_phrase_terms_r;
     }
 
     return search_impl<RANGE_SEARCH>(computer,
