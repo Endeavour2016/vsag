@@ -78,6 +78,84 @@ min_distance_between_lists(const PosSpan& list_a, const PosSpan& list_b, bool or
     return min_dist;
 }
 
+// Unordered min |a - b| via a single two-pointer merge over the sorted lists.
+// Standalone helper for compute_pairwise_proximity_fast so the fast path has no
+// dependency on min_distance_between_lists. O(L_a + L_b).
+uint32_t
+min_distance_between_lists_unordered_fast(const PosSpan& list_a, const PosSpan& list_b) {
+    uint32_t min_dist = std::numeric_limits<uint32_t>::max();
+    uint64_t i = 0;
+    uint64_t j = 0;
+    while (i < list_a.size && j < list_b.size) {
+        uint32_t a = list_a[i];
+        uint32_t b = list_b[j];
+        uint32_t dist = (a > b) ? (a - b) : (b - a);
+        if (dist < min_dist) {
+            min_dist = dist;
+        }
+        if (min_dist == 0) {
+            break;
+        }
+        if (a < b) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return min_dist;
+}
+
+// Ordered min distance via two-pass two-pointer merge over sorted lists.
+// Returns the same value as the ordered branch of min_distance_between_lists,
+// but in O(L_a + L_b) instead of O(L_a * L_b). Forward pairs (a <= b) cost b - a;
+// reverse pairs (a > b) cost (a - b) * 2.
+uint32_t
+min_distance_between_lists_ordered_fast(const PosSpan& list_a, const PosSpan& list_b) {
+    uint32_t min_forward = std::numeric_limits<uint32_t>::max();
+    // Pass 1: smallest forward gap b - a with a <= b (b is the ceiling of a).
+    {
+        uint64_t i = 0;
+        uint64_t j = 0;
+        while (i < list_a.size && j < list_b.size) {
+            if (list_a[i] <= list_b[j]) {
+                uint32_t dist = static_cast<uint32_t>(list_b[j]) - list_a[i];
+                if (dist < min_forward) {
+                    min_forward = dist;
+                }
+                ++i;  // grow a → shrink b - a
+            } else {
+                ++j;  // b too small for any remaining a
+            }
+        }
+    }
+    if (min_forward == 0) {
+        return 0;  // forward zero is unbeatable
+    }
+
+    uint32_t min_reverse_gap = std::numeric_limits<uint32_t>::max();
+    // Pass 2: smallest reverse gap a - b with a > b (a is the ceiling of b).
+    {
+        uint64_t i = 0;
+        uint64_t j = 0;
+        while (i < list_a.size && j < list_b.size) {
+            if (list_a[i] > list_b[j]) {
+                uint32_t dist = static_cast<uint32_t>(list_a[i]) - list_b[j];
+                if (dist < min_reverse_gap) {
+                    min_reverse_gap = dist;
+                }
+                ++j;  // grow b → shrink a - b
+            } else {
+                ++i;  // a too small to exceed b[j]
+            }
+        }
+    }
+
+    uint32_t min_reverse = (min_reverse_gap == std::numeric_limits<uint32_t>::max())
+                               ? std::numeric_limits<uint32_t>::max()
+                               : min_reverse_gap * 2;
+    return std::min(min_forward, min_reverse);
+}
+
 }  // namespace
 
 float
@@ -95,6 +173,33 @@ compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool orde
             }
             uint32_t dist =
                 min_distance_between_lists(position_lists[i], position_lists[j], ordered);
+            if (dist < std::numeric_limits<uint32_t>::max()) {
+                boost += 1.0f / static_cast<float>(dist + 1);
+            }
+        }
+    }
+
+    return boost;
+}
+
+float
+compute_pairwise_proximity_fast(const std::vector<PosSpan>& position_lists, bool ordered) {
+    float boost = 0.0f;
+    uint64_t n = position_lists.size();
+
+    for (uint64_t i = 0; i < n; ++i) {
+        if (position_lists[i].empty()) {
+            continue;
+        }
+        for (uint64_t j = i + 1; j < n; ++j) {
+            if (position_lists[j].empty()) {
+                continue;
+            }
+            uint32_t dist =
+                ordered ? min_distance_between_lists_ordered_fast(position_lists[i],
+                                                                  position_lists[j])
+                        : min_distance_between_lists_unordered_fast(position_lists[i],
+                                                                    position_lists[j]);
             if (dist < std::numeric_limits<uint32_t>::max()) {
                 boost += 1.0f / static_cast<float>(dist + 1);
             }
@@ -227,6 +332,102 @@ check_phrase_constraint(const std::vector<std::vector<uint16_t>>& phrase_term_po
         }
         return false;
     }
+}
+
+bool
+check_phrase_constraint_fast(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
+                             uint32_t slop,
+                             bool ordered) {
+    uint64_t n = phrase_term_positions.size();
+    if (n == 0) {
+        return true;
+    }
+
+    // All terms must be present
+    for (uint64_t i = 0; i < n; ++i) {
+        if (phrase_term_positions[i].empty()) {
+            return false;
+        }
+    }
+
+    if (n == 1) {
+        return true;
+    }
+
+    uint32_t max_span = slop + static_cast<uint32_t>(n) - 1;
+
+    if (!ordered) {
+        // Unordered: identical sliding-window logic to check_phrase_constraint,
+        // already O(M log M) — nothing to speed up here.
+        struct PosEntry {
+            uint16_t pos;
+            uint64_t term_idx;
+        };
+        std::vector<PosEntry> all_positions;
+        for (uint64_t i = 0; i < n; ++i) {
+            for (auto pos : phrase_term_positions[i]) {
+                all_positions.push_back({pos, i});
+            }
+        }
+        std::sort(all_positions.begin(),
+                  all_positions.end(),
+                  [](const PosEntry& a, const PosEntry& b) { return a.pos < b.pos; });
+
+        std::vector<uint32_t> term_count(n, 0);
+        uint64_t terms_covered = 0;
+        uint64_t left = 0;
+
+        for (uint64_t right = 0; right < all_positions.size(); ++right) {
+            auto idx = all_positions[right].term_idx;
+            if (term_count[idx] == 0) {
+                terms_covered++;
+            }
+            term_count[idx]++;
+
+            while (terms_covered == n) {
+                uint32_t span = all_positions[right].pos - all_positions[left].pos;
+                if (span <= max_span) {
+                    return true;
+                }
+                auto left_idx = all_positions[left].term_idx;
+                term_count[left_idx]--;
+                if (term_count[left_idx] == 0) {
+                    terms_covered--;
+                }
+                left++;
+            }
+        }
+        return false;
+    }
+
+    // Ordered: greedy + binary search, same verdict as the DFS in
+    // check_phrase_constraint but polynomial instead of worst-case O(P^n).
+    // For each start position of term 0, chain the smallest strictly-larger
+    // position of each subsequent term; that yields the minimal reachable end
+    // for that start, so if any ordered match exists we find the tightest one.
+    for (auto start : phrase_term_positions[0]) {
+        uint32_t prev = start;
+        bool ok = true;
+        for (uint64_t term_idx = 1; term_idx < n; ++term_idx) {
+            const auto& positions = phrase_term_positions[term_idx];
+            // First position strictly greater than prev.
+            auto it = std::upper_bound(positions.begin(), positions.end(), prev);
+            if (it == positions.end()) {
+                ok = false;
+                break;
+            }
+            uint32_t next = *it;
+            if (next - start > max_span) {
+                ok = false;
+                break;  // minimal end already exceeds span; larger picks only worse
+            }
+            prev = next;
+        }
+        if (ok) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool

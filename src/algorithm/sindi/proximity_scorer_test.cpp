@@ -399,3 +399,146 @@ TEST_CASE("ExtractPositions Term Not In Sequence", "[ut][ProximityScorer]") {
     REQUIRE(out[0][0] == 0);
     REQUIRE(out[1].empty());  // term 99 not found
 }
+
+// ===== compute_pairwise_proximity_fast (opt 4.1: ordered O(P^2)->O(P)) tests =====
+// Core intent: fast must be bit-for-bit identical to the old function so that
+// the ordered path is a pure speedup with zero recall drift. Every case below
+// cross-checks fast vs old on the SAME input.
+
+TEST_CASE("FastProximity CrossCheck Ordered Forward", "[ut][ProximityScorer]") {
+    std::vector<std::vector<uint16_t>> positions = {{0}, {5}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f / 6.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Ordered Reverse Penalty", "[ut][ProximityScorer]") {
+    std::vector<std::vector<uint16_t>> positions = {{10}, {5}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f / 11.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Ordered Multiple Positions", "[ut][ProximityScorer]") {
+    // Best forward pair (10,12) → dist=2 → 1/3, same as old ordered branch.
+    std::vector<std::vector<uint16_t>> positions = {{10, 100}, {12, 95}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f / 3.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Ordered Reverse Only", "[ut][ProximityScorer]") {
+    // No forward pair exists (all A positions > all B positions).
+    // Reverse best: (20,18) → gap=2 → dist=4 → 1/5.
+    std::vector<std::vector<uint16_t>> positions = {{20, 30}, {5, 18}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f / 5.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Ordered Dense Positions", "[ut][ProximityScorer]") {
+    // Dense multi-position lists across three terms — the scenario where the
+    // old O(P^2) per-pair loop is slowest. fast must match old exactly.
+    std::vector<std::vector<uint16_t>> positions = {
+        {1, 7, 15, 40, 88}, {3, 9, 22, 41, 90}, {2, 8, 16, 39, 100}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+}
+
+TEST_CASE("FastProximity CrossCheck Ordered Zero Forward", "[ut][ProximityScorer]") {
+    // Equal positions → forward dist=0 → boost 1.0, early-return path.
+    std::vector<std::vector<uint16_t>> positions = {{5, 20}, {5, 25}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), true);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Unordered Equals Old", "[ut][ProximityScorer]") {
+    // Unordered path reuses the old merge, so results are trivially identical.
+    std::vector<std::vector<uint16_t>> positions = {{0, 50, 200}, {3, 48, 300}};
+    float old_boost = compute_pairwise_proximity(to_spans(positions), false);
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), false);
+    REQUIRE_APPROX(fast_boost, old_boost);
+    REQUIRE_APPROX(fast_boost, 1.0f / 3.0f);
+}
+
+TEST_CASE("FastProximity CrossCheck Empty Skipped", "[ut][ProximityScorer]") {
+    std::vector<std::vector<uint16_t>> positions = {{5, 10}, {}};
+    float fast_boost = compute_pairwise_proximity_fast(to_spans(positions), true);
+    REQUIRE(fast_boost == 0.0f);
+}
+
+// ===== check_phrase_constraint_fast (opt 4.2: ordered O(P^n)->polynomial) tests =====
+// Same verdict as check_phrase_constraint; ordered path swaps DFS for greedy.
+
+TEST_CASE("FastPhrase CrossCheck Ordered Pass", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{0}, {2}};
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) ==
+            check_phrase_constraint(positions, 5, true));
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) == true);
+}
+
+TEST_CASE("FastPhrase CrossCheck Ordered Fail Reverse", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{5}, {2}};
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) ==
+            check_phrase_constraint(positions, 5, true));
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) == false);
+}
+
+TEST_CASE("FastPhrase CrossCheck Ordered Multiple Positions", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{5, 10}, {2, 12}};
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) ==
+            check_phrase_constraint(positions, 5, true));
+    REQUIRE(check_phrase_constraint_fast(positions, 5, true) == true);
+}
+
+TEST_CASE("FastPhrase CrossCheck Three Terms Ordered Pass", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{2}, {5}, {7}};
+    REQUIRE(check_phrase_constraint_fast(positions, 3, true) ==
+            check_phrase_constraint(positions, 3, true));
+    REQUIRE(check_phrase_constraint_fast(positions, 3, true) == true);
+}
+
+TEST_CASE("FastPhrase CrossCheck Three Terms Ordered Fail", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{2}, {5}, {3}};
+    REQUIRE(check_phrase_constraint_fast(positions, 3, true) ==
+            check_phrase_constraint(positions, 3, true));
+    REQUIRE(check_phrase_constraint_fast(positions, 3, true) == false);
+}
+
+TEST_CASE("FastPhrase CrossCheck Large Slop Dense Positions",
+          "[ut][ProximityScorer][PhraseFilter]") {
+    // Dense positions + large slop: the case where the old DFS backtracking
+    // balloons. The greedy fast path must reach the identical verdict.
+    std::vector<std::vector<uint16_t>> positions = {
+        {1, 4, 9, 20, 33, 55}, {2, 6, 10, 25, 40, 60}, {3, 8, 12, 30, 44, 70}};
+    for (uint32_t slop : {0u, 2u, 5u, 10u, 50u, 100u}) {
+        REQUIRE(check_phrase_constraint_fast(positions, slop, true) ==
+                check_phrase_constraint(positions, slop, true));
+    }
+}
+
+TEST_CASE("FastPhrase CrossCheck Missing Term Fails", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{0}, {}, {2}};
+    REQUIRE(check_phrase_constraint_fast(positions, 100, true) == false);
+    REQUIRE(check_phrase_constraint_fast(positions, 100, false) == false);
+}
+
+TEST_CASE("FastPhrase CrossCheck Single Term Passes", "[ut][ProximityScorer][PhraseFilter]") {
+    std::vector<std::vector<uint16_t>> positions = {{5}};
+    REQUIRE(check_phrase_constraint_fast(positions, 0, true) == true);
+}
+
+TEST_CASE("FastPhrase CrossCheck Unordered Equals Old", "[ut][ProximityScorer][PhraseFilter]") {
+    // Unordered path reuses the old sliding window.
+    std::vector<std::vector<uint16_t>> positions = {{0, 50}, {3, 48}};
+    REQUIRE(check_phrase_constraint_fast(positions, 2, false) ==
+            check_phrase_constraint(positions, 2, false));
+    REQUIRE(check_phrase_constraint_fast(positions, 2, false) == true);
+}

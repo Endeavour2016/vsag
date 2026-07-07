@@ -131,10 +131,12 @@ const char* const SPARSE_PROXIMITY_WEIGHT = "proximity_weight";
 const char* const SPARSE_PROXIMITY_ORDERED = "proximity_ordered";
 const char* const SPARSE_PROXIMITY_BOOST_MULTIPLICATIVE = "proximity_boost_multiplicative";
 const char* const SPARSE_PROXIMITY_ADJACENT_ONLY = "proximity_adjacent_only";
+const char* const SPARSE_PROXIMITY_FAST_PAIRS = "proximity_fast_pairs";
 const char* const SPARSE_PHRASE_TERMS = "phrase_terms";
 const char* const SPARSE_PHRASE_SLOP = "phrase_slop";
 const char* const SPARSE_PHRASE_ORDERED = "phrase_ordered";
 const char* const SPARSE_PHRASE_USE_SLOPPY = "phrase_use_sloppy";
+const char* const SPARSE_PHRASE_FAST_ORDERED = "phrase_fast_ordered";
 const char* const SPARSE_PHRASE_MOCK_TOP_K = "phrase_mock_top_k";
 
 // graph param value

@@ -57,6 +57,17 @@ struct PosSpan {
 float
 compute_pairwise_proximity(const std::vector<PosSpan>& position_lists, bool ordered);
 
+// Faster equivalent of compute_pairwise_proximity that returns the same boost.
+//
+// Scores the same C(n,2) term pairs and accumulates the same 1/(min_dist + 1),
+// so the result is bit-for-bit identical to compute_pairwise_proximity. The only
+// difference is the ordered per-pair distance: instead of the O(P^2) all-pairs
+// double loop it uses a two-pass two-pointer merge over the sorted lists, cutting
+// a single ordered pair from O(P^2) to O(P). The unordered path is unchanged (it
+// was already an O(L) merge).
+float
+compute_pairwise_proximity_fast(const std::vector<PosSpan>& position_lists, bool ordered);
+
 // Simplified proximity boost that only scores adjacent query-term pairs.
 //
 // Unlike compute_pairwise_proximity (which scores all C(n,2) pairs), this scores
@@ -80,6 +91,21 @@ bool
 check_phrase_constraint(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
                         uint32_t slop,
                         bool ordered);
+
+// Faster equivalent of check_phrase_constraint that returns the same verdict.
+//
+// Same semantics as check_phrase_constraint (all terms must be present; a match
+// needs a window with span <= slop + num_terms - 1; ordered=true additionally
+// requires strictly increasing positions). The unordered path reuses the same
+// O(M log M) sliding window. The ordered path replaces the worst-case O(P^n) DFS
+// backtracking with a greedy + binary-search scan: for each start position of
+// term 0, chain the smallest strictly-larger position of each subsequent term via
+// std::lower_bound, giving the minimal reachable end; pass if any start's span
+// fits. This is O(L0 * n * log L) and yields the identical true/false result.
+bool
+check_phrase_constraint_fast(const std::vector<std::vector<uint16_t>>& phrase_term_positions,
+                             uint32_t slop,
+                             bool ordered);
 
 // Phrase constraint using Lucene SloppyPhraseMatcher's normalized-window slop.
 //

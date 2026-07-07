@@ -101,6 +101,8 @@ public:
     bool proximity_boost_multiplicative{true};  // true=multiplicative, false=additive
     // true → adjacent-only pairs (n-1), false → all pairs C(n,2)
     bool proximity_adjacent_only{false};
+    // true → compute_pairwise_proximity_fast (ordered two-pointer, same result as legacy)
+    bool proximity_fast_pairs{false};
 
     // phrase filter
     std::vector<uint32_t> phrase_terms;
@@ -108,6 +110,8 @@ public:
     bool phrase_ordered{false};
     // true → Lucene-normalized sloppy matcher, false → legacy ordered/unordered
     bool phrase_use_sloppy{false};
+    // true → check_phrase_constraint_fast (ordered greedy+binary-search, same verdict as legacy)
+    bool phrase_fast_ordered{false};
     // >0 且未显式传 phrase_terms 时,取 top-k 权重 term 作 mock(本地压测用)
     uint32_t phrase_mock_top_k{0};
 };

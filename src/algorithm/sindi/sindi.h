@@ -214,10 +214,12 @@ private:
                 bool proximity_boost_multiplicative = true,
                 uint32_t query_term_count = 0,
                 bool proximity_adjacent_only = false,
+                bool proximity_fast_pairs = false,
                 const std::vector<uint32_t>* phrase_terms = nullptr,
                 uint32_t phrase_slop = 0,
                 bool phrase_ordered = false,
-                bool phrase_use_sloppy = false) const;
+                bool phrase_use_sloppy = false,
+                bool phrase_fast_ordered = false) const;
 
     template <InnerSearchMode mode>
     DatasetPtr

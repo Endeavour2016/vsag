@@ -406,10 +406,12 @@ SINDI::KnnSearch(const DatasetPtr& query,
                                    search_param.proximity_boost_multiplicative,
                                    effective_query.len_,
                                    search_param.proximity_adjacent_only,
+                                   search_param.proximity_fast_pairs,
                                    phrase_ptr,
                                    search_param.phrase_slop,
                                    search_param.phrase_ordered,
-                                   search_param.phrase_use_sloppy);
+                                   search_param.phrase_use_sloppy,
+                                   search_param.phrase_fast_ordered);
 }
 
 std::optional<uint32_t>
@@ -788,10 +790,12 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                    bool proximity_boost_multiplicative,
                    uint32_t query_term_count,
                    bool proximity_adjacent_only,
+                   bool proximity_fast_pairs,
                    const std::vector<uint32_t>* phrase_terms,
                    uint32_t phrase_slop,
                    bool phrase_ordered,
-                   bool phrase_use_sloppy) const {
+                   bool phrase_use_sloppy,
+                   bool phrase_fast_ordered) const {
     // computer and heap
     MaxHeap heap(allocator);
     int64_t k = 0;
@@ -934,6 +938,8 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                     all_present &&
                     (phrase_use_sloppy
                          ? check_phrase_constraint_sloppy(phrase_positions, phrase_slop)
+                     : phrase_fast_ordered
+                         ? check_phrase_constraint_fast(phrase_positions, phrase_slop, phrase_ordered)
                          : check_phrase_constraint(phrase_positions, phrase_slop, phrase_ordered));
                 if (!phrase_ok) {
                     dists[doc_idx] = 0.0f;  // discard
@@ -1005,6 +1011,8 @@ SINDI::search_impl(const SparseTermComputerPtr& computer,
                 float raw_boost =
                     proximity_adjacent_only
                         ? calculate_pairwise_proximity(position_lists, proximity_ordered)
+                    : proximity_fast_pairs
+                        ? compute_pairwise_proximity_fast(position_lists, proximity_ordered)
                         : compute_pairwise_proximity(position_lists, proximity_ordered);
                 if (raw_boost > 0.0f) {
                     // Normalize by the number of scored pairs: n-1 for adjacent-only,
@@ -1220,10 +1228,12 @@ SINDI::RangeSearch(const DatasetPtr& query,
                                      search_param.proximity_boost_multiplicative,
                                      effective_query.len_,
                                      search_param.proximity_adjacent_only,
+                                     search_param.proximity_fast_pairs,
                                      phrase_ptr_r,
                                      search_param.phrase_slop,
                                      search_param.phrase_ordered,
-                                     search_param.phrase_use_sloppy);
+                                     search_param.phrase_use_sloppy,
+                                     search_param.phrase_fast_ordered);
 }
 
 void
